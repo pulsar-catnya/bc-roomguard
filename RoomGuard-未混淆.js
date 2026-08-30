@@ -1083,21 +1083,20 @@ function RGUIBuild() {
 
 	
 	const bar = RGEl("div", {
-		display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", padding: "8px 12px",
+		position: "relative", padding: "8px 12px",
 		background: "#141826", borderBottom: "1px solid " + RG_BORDER,
 		cursor: "move", userSelect: "none",
 	});
-	const icon = RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡");
+	const left = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", paddingRight: "80px" });
+	left.appendChild(RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡"));
 	const title = RGEl("span", { fontWeight: "700", fontSize: "15px" }, RGT("title"));
-	const left = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
-	left.appendChild(icon);
 	left.appendChild(title);
+	bar.appendChild(left);
 	const btnMin = RGSmallBtn("—", () => { RGUI.minimized = !RGUI.minimized; RGUIRefresh(); }, { title: RGT("minimizeTitle") });
 	const btnClose = RGSmallBtn("✕", RoomGuardClose, { title: RGT("closeTitle") });
-	const right = RGEl("div", { display: "flex", alignItems: "center", gap: "8px" });
+	const right = RGEl("div", { position: "absolute", right: "10px", top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", gap: "8px" });
 	right.appendChild(btnMin);
 	right.appendChild(btnClose);
-	bar.appendChild(left);
 	bar.appendChild(right);
 
 	
@@ -1161,17 +1160,19 @@ function RGUILogWinBuild() {
 	});
 
 	const bar = RGEl("div", {
-		display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", padding: "8px 12px",
+		position: "relative", padding: "8px 12px",
 		background: "#141826", borderBottom: "1px solid " + RG_BORDER,
 		cursor: "move", userSelect: "none",
 	});
-	const left = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
+	const left = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", paddingRight: "44px" });
 	left.appendChild(RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡"));
-	left.appendChild(RGEl("span", { fontWeight: "700", fontSize: "15px" }, RGT("logHeader")));
-	const title = left.lastChild;
-	const btnClose = RGSmallBtn("✕", RGUILogWinClose, { title: RGT("closeTitle") });
+	const title = RGEl("span", { fontWeight: "700", fontSize: "15px" }, RGT("logHeader"));
+	left.appendChild(title);
 	bar.appendChild(left);
-	bar.appendChild(btnClose);
+	const btnClose = RGSmallBtn("✕", RGUILogWinClose, { title: RGT("closeTitle") });
+	const right = RGEl("div", { position: "absolute", right: "10px", top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", gap: "8px" });
+	right.appendChild(btnClose);
+	bar.appendChild(right);
 
 	
 	const toolbar = RGEl("div", {
