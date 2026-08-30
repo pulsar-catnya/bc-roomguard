@@ -124,6 +124,7 @@ function RGDefaultState() {
 			msgRestraint: "提示：{0} 尚未发言就给他人穿戴束缚道具，即将被移出房间。",
 		},
 		kickCount: {},           
+		banCount: {},            
 		log: [],                 
 	};
 }
@@ -150,6 +151,7 @@ function RGNormalizeState(raw) {
 		st.msgClothes = typeof s.msgClothes === "string" ? s.msgClothes : st.msgClothes;
 		st.msgRestraint = typeof s.msgRestraint === "string" ? s.msgRestraint : st.msgRestraint;
 		d.kickCount = (raw.kickCount && typeof raw.kickCount === "object") ? raw.kickCount : {};
+		d.banCount = (raw.banCount && typeof raw.banCount === "object") ? raw.banCount : Object.assign({}, d.kickCount);
 		d.log = Array.isArray(raw.log) ? raw.log.slice(0, RG_LOG_CAP) : [];
 	}
 	return d;
@@ -238,6 +240,11 @@ function RGMergeState(existing, mine) {
 		const a = Number(m.kickCount[k]) || 0;
 		const b = Number(mine.kickCount[k]) || 0;
 		m.kickCount[k] = a > b ? a : b;
+	}
+	for (const k in mine.banCount) {
+		const a = Number(m.banCount[k]) || 0;
+		const b = Number(mine.banCount[k]) || 0;
+		m.banCount[k] = a > b ? a : b;
 	}
 	return m;
 }
@@ -469,9 +476,10 @@ function RGFinishKick(s, keys) {
 	state.log.unshift(entry);
 	if (state.log.length > RG_LOG_CAP) state.log.length = RG_LOG_CAP;
 	state.kickCount[s.num] = (Number(state.kickCount[s.num]) || 0) + 1;
-	const kc = state.kickCount[s.num];
+	state.banCount[s.num] = (Number(state.banCount[s.num]) || 0) + 1;
+	const bc = state.banCount[s.num];
 
-	const willBan = state.settings.banAfterKicks > 0 && kc >= state.settings.banAfterKicks;
+	const willBan = state.settings.banAfterKicks > 0 && bc >= state.settings.banAfterKicks;
 	entry.banned = willBan;
 	RGStore.save();
 
@@ -764,6 +772,7 @@ const RGText = {
 		kickedCount: "累计踢出 {0} 次",
 		remainToBan: "还剩 {0} 次拉黑",
 		resetCountBtn: "归零计数",
+		resetConfirmBtn: "再次点击归零",
 		expandAll: "展开全部 {0} 条",
 		collapse: "收起",
 		exportBtn: "导出日志",
@@ -839,6 +848,7 @@ const RGText = {
 		kickedCount: "Kicked {0} times total",
 		remainToBan: "{0} more to ban",
 		resetCountBtn: "Reset",
+		resetConfirmBtn: "Click again to reset",
 		expandAll: "Show all {0}",
 		collapse: "Collapse",
 		exportBtn: "Export log",
@@ -942,7 +952,7 @@ function RGBigBtn(label, onClick, opts) {
 		borderRadius: "8px", cursor: "pointer",
 	}, label);
 	b.title = opts.title || "";
-	b.addEventListener("click", (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); onClick(); });
+	b.addEventListener("click", (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); onClick(ev); });
 	return b;
 }
 
@@ -955,7 +965,7 @@ function RGSmallBtn(label, onClick, opts) {
 		borderRadius: "6px", cursor: "pointer",
 	}, label);
 	b.title = opts.title || "";
-	b.addEventListener("click", (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); onClick(); });
+	b.addEventListener("click", (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); onClick(ev); });
 	return b;
 }
 
@@ -1007,7 +1017,8 @@ function RGUIDotBuild() {
 		cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
 		userSelect: "none", right: "16px", bottom: "16px",
 	});
-	const shield = RGEl("span", { fontSize: "22px", filter: "brightness(0) invert(1)", lineHeight: "1" }, "🛡");
+	const shield = RGEl("span", { display: "flex", alignItems: "center", justifyContent: "center", width: "22px", height: "22px" });
+	shield.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22"><path fill="#ffffff" d="M12 2 L20 5 V11 C20 16 16 20 12 22 C8 20 4 16 4 11 V5 Z"/></svg>';
 	dot.appendChild(shield);
 	dot.title = RGT("dotTitle");
 
@@ -1072,19 +1083,22 @@ function RGUIBuild() {
 
 	
 	const bar = RGEl("div", {
-		display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px",
+		display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", padding: "8px 12px",
 		background: "#141826", borderBottom: "1px solid " + RG_BORDER,
 		cursor: "move", userSelect: "none",
 	});
 	const icon = RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡");
-	const title = RGEl("span", { fontWeight: "700", fontSize: "15px", flex: "1" }, RGT("title"));
+	const title = RGEl("span", { fontWeight: "700", fontSize: "15px" }, RGT("title"));
+	const left = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
+	left.appendChild(icon);
+	left.appendChild(title);
 	const btnMin = RGSmallBtn("—", () => { RGUI.minimized = !RGUI.minimized; RGUIRefresh(); }, { title: RGT("minimizeTitle") });
-	btnMin.style.marginLeft = "auto";
 	const btnClose = RGSmallBtn("✕", RoomGuardClose, { title: RGT("closeTitle") });
-	bar.appendChild(icon);
-	bar.appendChild(title);
-	bar.appendChild(btnMin);
-	bar.appendChild(btnClose);
+	const right = RGEl("div", { display: "flex", alignItems: "center", gap: "8px" });
+	right.appendChild(btnMin);
+	right.appendChild(btnClose);
+	bar.appendChild(left);
+	bar.appendChild(right);
 
 	
 	const toolbar = RGEl("div", {
@@ -1147,15 +1161,16 @@ function RGUILogWinBuild() {
 	});
 
 	const bar = RGEl("div", {
-		display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px",
+		display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", padding: "8px 12px",
 		background: "#141826", borderBottom: "1px solid " + RG_BORDER,
 		cursor: "move", userSelect: "none",
 	});
-	bar.appendChild(RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡"));
-	const title = RGEl("span", { fontWeight: "700", fontSize: "15px", flex: "1" }, RGT("logHeader"));
+	const left = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", minWidth: "0" });
+	left.appendChild(RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡"));
+	left.appendChild(RGEl("span", { fontWeight: "700", fontSize: "15px" }, RGT("logHeader")));
+	const title = left.lastChild;
 	const btnClose = RGSmallBtn("✕", RGUILogWinClose, { title: RGT("closeTitle") });
-	btnClose.style.marginLeft = "auto";
-	bar.appendChild(title);
+	bar.appendChild(left);
 	bar.appendChild(btnClose);
 
 	
@@ -1552,10 +1567,13 @@ function RGLogGroupEl(g) {
 	left.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("kickedCount", kc)));
 	const banAfter = Number(RGStore.state.settings.banAfterKicks) || 0;
 	if (banAfter > 0) {
-		const remain = Math.max(0, banAfter - kc);
+		const bc = Number(RGStore.state.banCount[g.num]) || 0;
+		const remain = Math.max(0, banAfter - bc);
 		left.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("remainToBan", remain)));
 	}
-	const resetBtn = RGSmallBtn(RGT("resetCountBtn"), () => RGResetKickCount(g.num));
+	const resetArmed = RGResetArmed === g.num;
+	const resetBtn = RGSmallBtn(resetArmed ? RGT("resetConfirmBtn") : RGT("resetCountBtn"), () => RGResetKickCountClick(g.num));
+	if (resetArmed) { resetBtn.style.background = "#e74c3c"; resetBtn.style.borderColor = "#ffb3b3"; }
 	head.appendChild(left);
 	head.appendChild(resetBtn);
 	wrap.appendChild(head);
@@ -1589,10 +1607,22 @@ function RGLogActionText(a) {
 }
 
  
-function RGResetKickCount(num) {
+let RGResetArmed = null;
+let RGResetTimer = null;
+
+function RGResetKickCountClick(num) {
 	if (!Number.isInteger(num)) return;
-	RGStore.state.kickCount[num] = 0;
-	RGStore.save();
+	if (RGResetArmed === num) {
+		RGResetArmed = null;
+		if (RGResetTimer) { clearTimeout(RGResetTimer); RGResetTimer = null; }
+		RGStore.state.banCount[num] = 0;
+		RGStore.flush();
+		RGUI.renderLog();
+		return;
+	}
+	RGResetArmed = num;
+	if (RGResetTimer) clearTimeout(RGResetTimer);
+	RGResetTimer = setTimeout(() => { RGResetArmed = null; RGUI.renderLog(); }, 3000);
 	RGUI.renderLog();
 }
 
@@ -1680,7 +1710,7 @@ function RGUIArmClear(btn) {
 	if (RGUI.clearTimer) { clearTimeout(RGUI.clearTimer); RGUI.clearTimer = null; }
 	if (btn) { btn.textContent = RGT("clearBtn"); btn.style.background = btn._origBg || ""; btn.style.borderColor = btn._origBorder || ""; }
 	RGStore.state.log = [];
-	RGStore.save();
+	RGStore.flush(); 
 	RGUI.renderLog();
 	RGToast(RGT("toastCleared"));
 }
@@ -1789,7 +1819,7 @@ function RGExposeAPI() {
 			return RGDoAdmin("Ban", num);
 		},
 		Export: () => JSON.stringify({ mod: "RoomGuard", version: RG_VERSION, exportedAt: RGNow(), account: RGStore.accountNum, settings: RGStore.state.settings, log: RGStore.state.log }),
-		ClearLog: () => { RGStore.state.log = []; RGStore.save(); RGUI.renderLog(); return true; },
+		ClearLog: () => { RGStore.state.log = []; RGStore.flush(); RGUI.renderLog(); return true; },
 	};
 }
 
@@ -1841,7 +1871,7 @@ if (typeof module !== "undefined" && module.exports) {
 		RGState, RGIsAdmin, RGIsProtected, RGIsRelatedToRoom, RGComputeConds, RGTriggeredKeys, RGCondsTrigger,
 		RGColorKey, RGItemViewOf, RGItemViewFromData, RGClassifyChange,
 		RGOnJoin, RGOnMessage, RGOnItemChange, RGAppView, RGOnFullChange,
-		RGKickNow, RGFinishKick, RGDoAdmin, RGMaybeTrigger, RGNotifySend, RGNotifySendAll, RGNotifySendRaw, RGResetKickCount,
+		RGKickNow, RGFinishKick, RGDoAdmin, RGMaybeTrigger, RGNotifySend, RGNotifySendAll, RGNotifySendRaw, RGResetKickCountClick,
 		RGInstallHooks, RGText, RGT, RGReasonLabel, RGChangeLabel,
 		RGUI, RoomGuardOpen, RoomGuardClose, RoomGuardToggle, RGUIRefresh, RGUIBackupExport,
 		RGUILogWinShow, RGUILogWinClose, RGUILogWinToggle, RGUILangToggle, RGAttachDrag,
