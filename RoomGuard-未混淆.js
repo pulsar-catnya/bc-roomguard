@@ -117,6 +117,8 @@ function RGDefaultState() {
 			clothesMaxSpoken: 1,  
 			restraintMaxSpoken: 1,
 			notifyBeforeKick: true, 
+			msgDelaySeconds: 1.5,   
+			kickDelaySeconds: 3,    
 			msgAge: "提示：{0} 的账号创建时间过短，即将被移出房间。",
 			msgClothes: "提示：{0} 尚未发言就开始改动他人的服装，即将被移出房间。",
 			msgRestraint: "提示：{0} 尚未发言就给他人穿戴束缚道具，即将被移出房间。",
@@ -142,6 +144,8 @@ function RGNormalizeState(raw) {
 		st.clothesMaxSpoken = Number.isFinite(Number(s.clothesMaxSpoken)) && Number(s.clothesMaxSpoken) >= 1 ? Math.floor(Number(s.clothesMaxSpoken)) : 1;
 		st.restraintMaxSpoken = Number.isFinite(Number(s.restraintMaxSpoken)) && Number(s.restraintMaxSpoken) >= 1 ? Math.floor(Number(s.restraintMaxSpoken)) : 1;
 		st.notifyBeforeKick = s.notifyBeforeKick !== false;
+		st.msgDelaySeconds = Number.isFinite(Number(s.msgDelaySeconds)) && Number(s.msgDelaySeconds) >= 0 ? Number(s.msgDelaySeconds) : 1.5;
+		st.kickDelaySeconds = Number.isFinite(Number(s.kickDelaySeconds)) && Number(s.kickDelaySeconds) >= 0 ? Number(s.kickDelaySeconds) : 3;
 		st.msgAge = typeof s.msgAge === "string" ? s.msgAge : st.msgAge;
 		st.msgClothes = typeof s.msgClothes === "string" ? s.msgClothes : st.msgClothes;
 		st.msgRestraint = typeof s.msgRestraint === "string" ? s.msgRestraint : st.msgRestraint;
@@ -423,6 +427,11 @@ function RGNotifySend(s, key) {
 }
 
  
+function RGNotifySendAll(s, keys) {
+	for (const k of keys) RGNotifySend(s, k);
+}
+
+ 
 function RGKickNow(s) {
 	if (s.kicked || s.kickPending) return;
 	const st = RGStore.state.settings;
@@ -430,8 +439,10 @@ function RGKickNow(s) {
 	s.kickPending = true;
 
 	if (st.notifyBeforeKick) {
-		for (const k of keys) RGNotifySend(s, k);
-		setTimeout(() => RGFinishKick(s, keys), 3000);
+		const msgMs = Math.max(0, Number(st.msgDelaySeconds) || 0) * 1000;
+		const kickMs = Math.max(0, Number(st.kickDelaySeconds) || 0) * 1000;
+		setTimeout(() => RGNotifySendAll(s, keys), msgMs);
+		setTimeout(() => RGFinishKick(s, keys), kickMs);
 	} else {
 		RGFinishKick(s, keys);
 	}
@@ -727,6 +738,9 @@ const RGText = {
 		msgClothesLabel: "改衣服条件提示消息",
 		msgRestraintLabel: "上束缚条件提示消息",
 		msgPlaceholder: "消息里可用 {0} 表示对方昵称/名字",
+		msgDelaySeconds: "消息延迟（秒）",
+		kickDelaySeconds: "踢出延迟（秒）",
+		logSearchPh: "搜索昵称/名字/数字ID",
 		statusAdmin: "● 你是房间管理员：守卫生效，会检查新加入的玩家",
 		statusNotAdmin: "○ 你不是房间管理员：守卫不会踢人（仅可查看/修改设置与日志）",
 		statusDisabled: "○ 守卫已关闭（主开关未启用）",
@@ -799,6 +813,9 @@ const RGText = {
 		msgClothesLabel: "Clothes condition notice",
 		msgRestraintLabel: "Restraint condition notice",
 		msgPlaceholder: "Use {0} for the player's name",
+		msgDelaySeconds: "Message delay (sec)",
+		kickDelaySeconds: "Kick delay (sec)",
+		logSearchPh: "Search nickname/name/ID",
 		statusAdmin: "● You are a room admin: guard is active for new joiners",
 		statusNotAdmin: "○ You are not a room admin: guard won't kick (settings/log still viewable)",
 		statusDisabled: "○ Guard is disabled (master switch off)",
@@ -893,9 +910,15 @@ const RGUI = {
 	logTitleEl: null,
 	logEl: null,
 	dot: null,
+	btnLog: null,
+	btnLang: null,
+	btnExport: null,
+	btnClear: null,
+	msgSection: null,
+	combineRow: null,
+	logSearch: "",
+	logSearchEl: null,
 	minimized: false,
-	winDrag: null,
-	resDrag: null,
 	clearArmed: false,
 	clearTimer: null,
 	refreshTimer: null,
@@ -979,11 +1002,13 @@ function RGUIDotBuild() {
 	if (RGUI.dot) return;
 	const dot = RGEl("div", {
 		position: "fixed", zIndex: "2147483000", width: "46px", height: "46px",
-		borderRadius: "50%", background: RG_ACCENT, color: "#ffffff",
+		borderRadius: "50%", background: "linear-gradient(135deg, #c0392b, #e74c3c)",
 		display: "flex", alignItems: "center", justifyContent: "center",
-		fontSize: "20px", cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+		cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
 		userSelect: "none", right: "16px", bottom: "16px",
-	}, "🛡");
+	});
+	const shield = RGEl("span", { fontSize: "22px", filter: "brightness(0) invert(1)", lineHeight: "1" }, "🛡");
+	dot.appendChild(shield);
 	dot.title = RGT("dotTitle");
 
 	let saved = null;
@@ -1054,6 +1079,7 @@ function RGUIBuild() {
 	const icon = RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡");
 	const title = RGEl("span", { fontWeight: "700", fontSize: "15px", flex: "1" }, RGT("title"));
 	const btnMin = RGSmallBtn("—", () => { RGUI.minimized = !RGUI.minimized; RGUIRefresh(); }, { title: RGT("minimizeTitle") });
+	btnMin.style.marginLeft = "auto";
 	const btnClose = RGSmallBtn("✕", RoomGuardClose, { title: RGT("closeTitle") });
 	bar.appendChild(icon);
 	bar.appendChild(title);
@@ -1069,6 +1095,8 @@ function RGUIBuild() {
 	const btnLang = RGBigBtn(RGT("langBtn"), RGUILangToggle);
 	toolbar.appendChild(btnLog);
 	toolbar.appendChild(btnLang);
+	RGUI.btnLog = btnLog;
+	RGUI.btnLang = btnLang;
 
 	
 	const body = RGEl("div", { flex: "1", overflow: "auto", padding: "12px", background: RG_BG });
@@ -1126,6 +1154,7 @@ function RGUILogWinBuild() {
 	bar.appendChild(RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡"));
 	const title = RGEl("span", { fontWeight: "700", fontSize: "15px", flex: "1" }, RGT("logHeader"));
 	const btnClose = RGSmallBtn("✕", RGUILogWinClose, { title: RGT("closeTitle") });
+	btnClose.style.marginLeft = "auto";
 	bar.appendChild(title);
 	bar.appendChild(btnClose);
 
@@ -1138,6 +1167,21 @@ function RGUILogWinBuild() {
 	const btnClear = RGBigBtn(RGT("clearBtn"), (ev) => RGUIArmClear(ev && ev.currentTarget ? ev.currentTarget : null), { bg: "#7a2c3a" });
 	toolbar.appendChild(btnExport);
 	toolbar.appendChild(btnClear);
+	RGUI.btnExport = btnExport;
+	RGUI.btnClear = btnClear;
+
+	
+	const searchRow = RGEl("div", { padding: "6px 12px", background: RG_PANEL, borderBottom: "1px solid " + RG_BORDER });
+	const search = RGEl("input", {
+		width: "100%", boxSizing: "border-box", padding: "6px 8px", fontSize: "13px", borderRadius: "6px",
+		background: "#10141f", color: RG_TEXT, border: "1px solid " + RG_BORDER, fontFamily: "sans-serif",
+	});
+	search.type = "text";
+	search.placeholder = RGT("logSearchPh");
+	search.value = RGUI.logSearch || "";
+	search.addEventListener("input", () => { RGUI.logSearch = search.value; RGUI.renderLog(); });
+	searchRow.appendChild(search);
+	RGUI.logSearchEl = search;
 
 	const log = RGEl("div", { flex: "1", overflow: "auto", padding: "10px" });
 
@@ -1149,6 +1193,7 @@ function RGUILogWinBuild() {
 
 	win.appendChild(bar);
 	win.appendChild(toolbar);
+	win.appendChild(searchRow);
 	win.appendChild(log);
 	win.appendChild(res);
 
@@ -1185,7 +1230,14 @@ function RGUILangToggle() {
 	if (RGUI.titleEl) RGUI.titleEl.textContent = RGT("title");
 	if (RGUI.logTitleEl) RGUI.logTitleEl.textContent = RGT("logHeader");
 	if (RGUI.dot) RGUI.dot.title = RGT("dotTitle");
-	RGUIRefresh();
+	if (RGUI.btnLog) RGUI.btnLog.textContent = RGT("logBtn");
+	if (RGUI.btnLang) RGUI.btnLang.textContent = RGT("langBtn");
+	if (RGUI.btnExport) RGUI.btnExport.textContent = RGT("exportBtn");
+	if (RGUI.btnClear) RGUI.btnClear.textContent = RGT("clearBtn");
+	if (RGUI.logSearchEl) RGUI.logSearchEl.placeholder = RGT("logSearchPh");
+	if (RGUI.settingsEl) RGUIBuildSettings(RGUI.settingsEl); 
+	RGUI.renderStatus();
+	RGUI.renderLog();
 }
 
  
@@ -1240,14 +1292,20 @@ function RGUIBuildSettings(root) {
 	
 	root.appendChild(RGCheckboxRow("rg-set-notify", RGT("notifyBeforeKick"), "change", (v) => {
 		RGStore.state.settings.notifyBeforeKick = v; RGStore.save();
+		RGUI.renderSettings(); 
 	}, RGT("notifyBeforeKickTitle")));
 
 	
+	RGUI.msgSection = RGEl("div", { marginLeft: "6px", paddingLeft: "8px", borderLeft: "2px solid " + RG_BORDER });
+	root.appendChild(RGUI.msgSection);
+
 	const hint = RGEl("div", { color: RG_TEXT_DIM, fontSize: "12px", margin: "2px 0 8px" }, RGT("msgPlaceholder"));
-	root.appendChild(hint);
-	root.appendChild(RGTextRow("rg-set-msgAge", RGT("msgAgeLabel"), (v) => { RGStore.state.settings.msgAge = v; RGStore.save(); }));
-	root.appendChild(RGTextRow("rg-set-msgClothes", RGT("msgClothesLabel"), (v) => { RGStore.state.settings.msgClothes = v; RGStore.save(); }));
-	root.appendChild(RGTextRow("rg-set-msgRestraint", RGT("msgRestraintLabel"), (v) => { RGStore.state.settings.msgRestraint = v; RGStore.save(); }));
+	RGUI.msgSection.appendChild(hint);
+	RGUI.msgSection.appendChild(RGNumberRowDec("rg-set-msgDelay", RGT("msgDelaySeconds"), 0, 60, (v) => { RGStore.state.settings.msgDelaySeconds = v; RGStore.save(); }));
+	RGUI.msgSection.appendChild(RGNumberRowDec("rg-set-kickDelay", RGT("kickDelaySeconds"), 0, 60, (v) => { RGStore.state.settings.kickDelaySeconds = v; RGStore.save(); }));
+	RGUI.msgSection.appendChild(RGTextRow("rg-set-msgAge", RGT("msgAgeLabel"), (v) => { RGStore.state.settings.msgAge = v; RGStore.save(); }));
+	RGUI.msgSection.appendChild(RGTextRow("rg-set-msgClothes", RGT("msgClothesLabel"), (v) => { RGStore.state.settings.msgClothes = v; RGStore.save(); }));
+	RGUI.msgSection.appendChild(RGTextRow("rg-set-msgRestraint", RGT("msgRestraintLabel"), (v) => { RGStore.state.settings.msgRestraint = v; RGStore.save(); }));
 
 	RGUI.renderSettings();
 }
@@ -1277,11 +1335,39 @@ function RGNumberRow(id, label, min, max, onChange) {
 	inp.id = id;
 	inp.min = String(min);
 	inp.max = String(max);
+	inp.step = "1";
 	inp.addEventListener("change", () => {
 		let v = Math.floor(Number(inp.value));
 		if (!Number.isFinite(v)) v = min;
 		if (v < min) v = min;
 		if (v > max) v = max;
+		inp.value = String(v);
+		onChange(v);
+	});
+	row.appendChild(span);
+	row.appendChild(inp);
+	return row;
+}
+
+ 
+function RGNumberRowDec(id, label, min, max, onChange) {
+	const row = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", fontSize: "13px", color: RG_TEXT });
+	const span = RGEl("span", { flex: "1" }, label);
+	const inp = RGEl("input", {
+		width: "72px", padding: "6px 8px", fontSize: "13px", borderRadius: "6px",
+		background: "#10141f", color: RG_TEXT, border: "1px solid " + RG_BORDER, fontFamily: "sans-serif",
+	});
+	inp.type = "number";
+	inp.id = id;
+	inp.min = String(min);
+	inp.max = String(max);
+	inp.step = "0.5";
+	inp.addEventListener("change", () => {
+		let v = Number(inp.value);
+		if (!Number.isFinite(v)) v = min;
+		if (v < min) v = min;
+		if (v > max) v = max;
+		v = Math.round(v * 10) / 10;
 		inp.value = String(v);
 		onChange(v);
 	});
@@ -1411,9 +1497,12 @@ RGUI.renderSettings = function () {
 	const cm = get("rg-set-clothesMaxSpoken"); if (cm) cm.value = String(s.clothesMaxSpoken);
 	const rm = get("rg-set-restraintMaxSpoken"); if (rm) rm.value = String(s.restraintMaxSpoken);
 	const nf = get("rg-set-notify"); if (nf) nf.checked = !!s.notifyBeforeKick;
+	const mdly = get("rg-set-msgDelay"); if (mdly) mdly.value = String(s.msgDelaySeconds);
+	const kdly = get("rg-set-kickDelay"); if (kdly) kdly.value = String(s.kickDelaySeconds);
 	const ma = get("rg-set-msgAge"); if (ma) ma.value = s.msgAge || "";
 	const mc = get("rg-set-msgClothes"); if (mc) mc.value = s.msgClothes || "";
 	const mr = get("rg-set-msgRestraint"); if (mr) mr.value = s.msgRestraint || "";
+	if (this.msgSection) this.msgSection.style.display = s.notifyBeforeKick ? "" : "none";
 	RGUIRenderCombine();
 };
 
@@ -1429,85 +1518,74 @@ RGUI.renderStatus = function () {
  
 RGUI.renderLog = function () {
 	if (!this.logEl) return;
-	const state = RGStore.state;
-	if (!state.log.length) {
+	const q = (this.logSearch || "").trim().toLowerCase();
+	const groups = new Map();
+	for (const e of RGStore.state.log) {
+		if (!groups.has(e.num)) groups.set(e.num, { num: e.num, name: e.name || "", nick: e.nick || "", kicks: [] });
+		groups.get(e.num).kicks.push(e);
+	}
+	const list = [];
+	groups.forEach(g => {
+		if (q) {
+			const hay = (g.nick + " " + g.name + " #" + g.num).toLowerCase();
+			if (hay.indexOf(q) < 0) return;
+		}
+		list.push(g);
+	});
+	if (!list.length) {
 		this.logEl.textContent = RGT("logEmpty");
 		return;
 	}
 	this.logEl.innerHTML = "";
-	for (let i = 0; i < state.log.length; i++) {
-		this.logEl.appendChild(RGLogEntryEl(state.log[i], i));
-	}
+	for (const g of list) this.logEl.appendChild(RGLogGroupEl(g));
 };
 
  
-function RGLogEntryEl(e, idx) {
-	const wrap = RGEl("div", { borderBottom: "1px solid " + RG_BORDER, padding: "8px 2px", fontSize: "12.5px", color: RG_TEXT });
+function RGLogGroupEl(g) {
+	const wrap = RGEl("div", { borderBottom: "1px solid " + RG_BORDER, padding: "8px 0", fontSize: "12.5px", color: RG_TEXT });
 
-	const head = RGEl("div", { display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" });
-	const time = RGEl("span", { color: RG_TEXT_DIM }, RGFormatTime(e.t));
-	const who = RGEl("span", { fontWeight: "700", color: RG_TEXT }, RGDispWho(e));
-	const reason = RGEl("span", { background: "rgba(231,76,60,.18)", color: "#ff9aa2", padding: "1px 6px", borderRadius: "4px" }, RGReasonLabel(e.reason));
-	head.appendChild(time);
-	head.appendChild(who);
-	head.appendChild(reason);
-	if (e.banned) {
-		head.appendChild(RGEl("span", { background: "#e74c3c", color: "#fff", padding: "1px 6px", borderRadius: "4px" }, RGT("bannedBadge")));
-	}
-	const kc = Number(RGStore.state.kickCount[e.num]) || 0;
-	if (kc > 0) {
-		head.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("kickedCount", kc)));
-	}
+	
+	const head = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "4px" });
+	const left = RGEl("div", { display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center", flex: "1", minWidth: "0" });
+	left.appendChild(RGEl("span", { fontWeight: "700", color: RG_TEXT }, RGDispWho(g)));
+	const kc = Number(RGStore.state.kickCount[g.num]) || 0;
+	left.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("kickedCount", kc)));
 	const banAfter = Number(RGStore.state.settings.banAfterKicks) || 0;
 	if (banAfter > 0) {
 		const remain = Math.max(0, banAfter - kc);
-		head.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("remainToBan", remain)));
-		head.appendChild(RGSmallBtn(RGT("resetCountBtn"), () => RGResetKickCount(e.num)));
+		left.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("remainToBan", remain)));
 	}
+	const resetBtn = RGSmallBtn(RGT("resetCountBtn"), () => RGResetKickCount(g.num));
+	head.appendChild(left);
+	head.appendChild(resetBtn);
 	wrap.appendChild(head);
 
-	const actions = Array.isArray(e.actions) ? e.actions : [];
-	const showMax = 3;
-	const collapsed = actions.length > showMax;
-	const shown = collapsed ? actions.slice(0, showMax) : actions;
-	const list = RGEl("div", { marginTop: "4px", paddingLeft: "8px" });
-	for (const a of shown) list.appendChild(RGLogActionEl(a));
-	wrap.appendChild(list);
-
-	if (collapsed) {
-		const more = RGEl("button", { marginTop: "4px", marginLeft: "8px", border: "none", background: "transparent", color: RG_ACCENT, cursor: "pointer", fontSize: "12px", padding: "0" }, RGT("expandAll", actions.length));
-		more.addEventListener("click", () => {
-			const expanded = list.getAttribute("data-expanded") === "1";
-			if (expanded) {
-				list.innerHTML = "";
-				for (const a of actions.slice(0, showMax)) list.appendChild(RGLogActionEl(a));
-				list.setAttribute("data-expanded", "0");
-				more.textContent = RGT("expandAll", actions.length);
-			} else {
-				list.innerHTML = "";
-				for (const a of actions) list.appendChild(RGLogActionEl(a));
-				list.setAttribute("data-expanded", "1");
-				more.textContent = RGT("collapse");
-			}
-		});
-		wrap.appendChild(more);
+	for (const e of g.kicks) {
+		const kickLine = RGEl("div", { margin: "3px 0 2px 4px" });
+		kickLine.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGFormatTime(e.t)));
+		kickLine.appendChild(RGEl("span", { background: "rgba(231,76,60,.18)", color: "#ff9aa2", padding: "1px 6px", borderRadius: "4px", marginLeft: "6px" }, RGReasonLabel(e.reason)));
+		if (e.banned) kickLine.appendChild(RGEl("span", { background: "#e74c3c", color: "#fff", padding: "1px 6px", borderRadius: "4px", marginLeft: "6px" }, RGT("bannedBadge")));
+		wrap.appendChild(kickLine);
+		const actions = Array.isArray(e.actions) ? e.actions : [];
+		for (const a of actions) {
+			const line = RGEl("div", { margin: "1px 0 1px 16px" });
+			line.appendChild(RGEl("span", { color: RG_TEXT_DIM, marginRight: "6px" }, RGFormatTime(a.t)));
+			line.appendChild(RGEl("span", { color: RG_TEXT }, RGLogActionText(a)));
+			wrap.appendChild(line);
+		}
 	}
 	return wrap;
 }
 
  
-function RGLogActionEl(a) {
-	const line = RGEl("div", { margin: "2px 0" });
-	const target = RGEl("span", { fontWeight: "700", color: RG_TEXT }, RGDisplayName(a.target));
+function RGLogActionText(a) {
 	const kind = a.kind === "restraint" ? RGT("kindRestraint") : RGT("kindClothes");
 	const change = RGChangeLabel(a.change);
 	const groupLabel = RGGroupLabel(a.group);
 	const itemLabel = a.item ? RGItemLabel(a.group, a.item) : "";
 	let detail = kind;
 	if (change) detail += "·" + change;
-	line.appendChild(target);
-	line.appendChild(RGEl("span", { color: RG_TEXT_DIM }, " " + detail + "：" + groupLabel + (itemLabel ? " " + itemLabel : "")));
-	return line;
+	return RGDisplayName(a.target) + " " + detail + "：" + groupLabel + (itemLabel ? " " + itemLabel : "");
 }
 
  
@@ -1763,12 +1841,12 @@ if (typeof module !== "undefined" && module.exports) {
 		RGState, RGIsAdmin, RGIsProtected, RGIsRelatedToRoom, RGComputeConds, RGTriggeredKeys, RGCondsTrigger,
 		RGColorKey, RGItemViewOf, RGItemViewFromData, RGClassifyChange,
 		RGOnJoin, RGOnMessage, RGOnItemChange, RGAppView, RGOnFullChange,
-		RGKickNow, RGFinishKick, RGDoAdmin, RGMaybeTrigger, RGNotifySend, RGNotifySendRaw, RGResetKickCount,
+		RGKickNow, RGFinishKick, RGDoAdmin, RGMaybeTrigger, RGNotifySend, RGNotifySendAll, RGNotifySendRaw, RGResetKickCount,
 		RGInstallHooks, RGText, RGT, RGReasonLabel, RGChangeLabel,
 		RGUI, RoomGuardOpen, RoomGuardClose, RoomGuardToggle, RGUIRefresh, RGUIBackupExport,
 		RGUILogWinShow, RGUILogWinClose, RGUILogWinToggle, RGUILangToggle, RGAttachDrag,
-		RGUIRenderCombine, RGCondChanged, RGTextRow,
-		RG_FORMAT: { RGFormatTime, RGDispWho, RGLogEntryEl, RGLogActionEl },
+		RGUIRenderCombine, RGCondChanged, RGTextRow, RGNumberRowDec,
+		RG_FORMAT: { RGFormatTime, RGDispWho, RGLogGroupEl, RGLogActionText },
 	};
 }
 
