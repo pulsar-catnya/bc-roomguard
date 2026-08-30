@@ -1,0 +1,1 @@
+javascript:(function(){const n=document.createElement('script');n.src='https://pulsar-catnya.github.io/bc-roomguard/RoomGuard.js?_='+Date.now();n.onload=()=>n.remove();document.head.appendChild(n);})();
