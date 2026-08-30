@@ -114,6 +114,12 @@ function RGDefaultState() {
 			minAgeDays: 30,       
 			combine: "any",       
 			banAfterKicks: 3,     
+			clothesMaxSpoken: 1,  
+			restraintMaxSpoken: 1,
+			notifyBeforeKick: true, 
+			msgAge: "提示：{0} 的账号创建时间过短，即将被移出房间。",
+			msgClothes: "提示：{0} 尚未发言就开始改动他人的服装，即将被移出房间。",
+			msgRestraint: "提示：{0} 尚未发言就给他人穿戴束缚道具，即将被移出房间。",
 		},
 		kickCount: {},           
 		log: [],                 
@@ -131,8 +137,14 @@ function RGNormalizeState(raw) {
 		st.condClothes = s.condClothes !== false;
 		st.condRestraint = s.condRestraint !== false;
 		st.minAgeDays = Number.isFinite(Number(s.minAgeDays)) && Number(s.minAgeDays) > 0 ? Math.floor(Number(s.minAgeDays)) : 30;
-		st.combine = s.combine === "all" ? "all" : "any";
+		st.combine = (s.combine === "all" || s.combine === "two") ? s.combine : "any";
 		st.banAfterKicks = Number.isFinite(Number(s.banAfterKicks)) && Number(s.banAfterKicks) >= 0 ? Math.floor(Number(s.banAfterKicks)) : 3;
+		st.clothesMaxSpoken = Number.isFinite(Number(s.clothesMaxSpoken)) && Number(s.clothesMaxSpoken) >= 1 ? Math.floor(Number(s.clothesMaxSpoken)) : 1;
+		st.restraintMaxSpoken = Number.isFinite(Number(s.restraintMaxSpoken)) && Number(s.restraintMaxSpoken) >= 1 ? Math.floor(Number(s.restraintMaxSpoken)) : 1;
+		st.notifyBeforeKick = s.notifyBeforeKick !== false;
+		st.msgAge = typeof s.msgAge === "string" ? s.msgAge : st.msgAge;
+		st.msgClothes = typeof s.msgClothes === "string" ? s.msgClothes : st.msgClothes;
+		st.msgRestraint = typeof s.msgRestraint === "string" ? s.msgRestraint : st.msgRestraint;
 		d.kickCount = (raw.kickCount && typeof raw.kickCount === "object") ? raw.kickCount : {};
 		d.log = Array.isArray(raw.log) ? raw.log.slice(0, RG_LOG_CAP) : [];
 	}
@@ -341,7 +353,6 @@ function RGComputeConds(s) {
 	const st = RGStore.state.settings;
 	s.c1 = s.hasCreation && s.ageDays < st.minAgeDays;
 	
-	if (s.spoken) { s.c2 = false; s.c3 = false; }
 	return s;
 }
 
@@ -350,8 +361,8 @@ function RGTriggeredKeys(s) {
 	const st = RGStore.state.settings;
 	const keys = [];
 	if (st.condAge && s.c1) keys.push("age");
-	if (st.condClothes && !s.spoken && s.c2) keys.push("clothes");
-	if (st.condRestraint && !s.spoken && s.c3) keys.push("restraint");
+	if (st.condClothes && s.c2) keys.push("clothes");
+	if (st.condRestraint && s.c3) keys.push("restraint");
 	return keys;
 }
 
@@ -360,16 +371,21 @@ function RGCondsTrigger(s) {
 	const st = RGStore.state.settings;
 	const enabled = [];
 	if (st.condAge) enabled.push(!!s.c1);
-	if (st.condClothes) enabled.push(!s.spoken && !!s.c2);
-	if (st.condRestraint) enabled.push(!s.spoken && !!s.c3);
+	if (st.condClothes) enabled.push(!!s.c2);
+	if (st.condRestraint) enabled.push(!!s.c3);
 	if (enabled.length === 0) return false;
 	if (st.combine === "all") return enabled.every(Boolean);
+	if (st.combine === "two") {
+		let n = 0;
+		for (const v of enabled) if (v) n++;
+		return n >= 2;
+	}
 	return enabled.some(Boolean);
 }
 
  
 function RGMaybeTrigger(s) {
-	if (!s || s.kicked) return;
+	if (!s || s.kicked || s.kickPending) return;
 	if (!RGStore.state.settings.enabled) return;
 	if (!RGIsAdmin()) return;
 	RGComputeConds(s);
@@ -386,12 +402,48 @@ function RGDoAdmin(action, num) {
 }
 
  
+function RGNotifySendRaw(text) {
+	try {
+		if (typeof ChatRoomSendChatMessage === "function") {
+			ChatRoomSendChatMessage(text);
+		} else {
+			ServerSend("ChatRoomChat", { Content: text, Type: "Chat", Dictionary: [] });
+		}
+	} catch (e) { RGErr("发送提示消息失败", e); }
+}
+
+ 
+function RGNotifySend(s, key) {
+	const st = RGStore.state.settings;
+	const map = { age: "msgAge", clothes: "msgClothes", restraint: "msgRestraint" };
+	const tmpl = st[map[key]];
+	if (!tmpl) return;
+	const label = s.nick || s.name || ("#" + s.num);
+	RGNotifySendRaw(tmpl.split("{0}").join(label));
+}
+
+ 
 function RGKickNow(s) {
-	if (s.kicked) return;
+	if (s.kicked || s.kickPending) return;
+	const st = RGStore.state.settings;
+	const keys = RGTriggeredKeys(s);
+	s.kickPending = true;
+
+	if (st.notifyBeforeKick) {
+		for (const k of keys) RGNotifySend(s, k);
+		setTimeout(() => RGFinishKick(s, keys), 3000);
+	} else {
+		RGFinishKick(s, keys);
+	}
+}
+
+ 
+function RGFinishKick(s, keys) {
+	s.kickPending = false;
+	if (RGState.suspects.get(s.num) !== s) return; 
 	s.kicked = true;
 	RGState.suspects.delete(s.num);
 
-	const keys = RGTriggeredKeys(s);
 	const state = RGStore.state;
 	const entry = {
 		t: RGNow(),
@@ -445,8 +497,8 @@ function RGOnJoin(charData, sourceNum) {
 
 	const s = {
 		num, name: name || "", nick: nick || "",
-		hasCreation, ageDays, joinedAt: RGNow(), spoken: false,
-		c1: false, c2: false, c3: false, kicked: false, actions: [],
+		hasCreation, ageDays, joinedAt: RGNow(), spokenCount: 0,
+		c1: false, c2: false, c3: false, kicked: false, kickPending: false, actions: [],
 	};
 	RGComputeConds(s);
 	RGState.suspects.set(num, s);
@@ -459,19 +511,23 @@ function RGOnMessage(data) {
 	if (RG_SPEECH_TYPES.indexOf(data.Type) < 0) return;
 	const s = RGState.suspects.get(data.Sender);
 	if (!s) return;
-	if (!s.spoken) {
-		s.spoken = true;
-		s.actions = []; 
-	}
+	s.spokenCount = (Number(s.spokenCount) || 0) + 1;
+}
+
+ 
+function RGSpokenLimit(kind) {
+	const st = RGStore.state.settings;
+	return (kind === "restraint") ? st.restraintMaxSpoken : st.clothesMaxSpoken;
 }
 
  
 function RGOnItemChange(source, target, group, before, after) {
 	const s = RGState.suspects.get(source);
-	if (!s || s.kicked || s.spoken) return;
+	if (!s || s.kicked) return;
 	if (source === target) return; 
 
 	const cls = RGClassifyChange(before, after, group);
+	if ((Number(s.spokenCount) || 0) >= RGSpokenLimit(cls.kind)) return; 
 	const itemName = cls.change === "remove" ? (before ? before.name : null) : (after ? after.name : null);
 	if (cls.kind === "restraint") s.c3 = true; else s.c2 = true;
 	s.actions.push({ t: RGNow(), target, kind: cls.kind, change: cls.change, group, item: itemName || null });
@@ -502,7 +558,7 @@ function RGAppView(C) {
  
 function RGOnFullChange(actor, victim, before, after) {
 	const s = RGState.suspects.get(actor);
-	if (!s || s.kicked || s.spoken) return;
+	if (!s || s.kicked) return;
 	if (actor === victim) return;
 
 	const groups = {};
@@ -520,6 +576,7 @@ function RGOnFullChange(actor, victim, before, after) {
 		const b = before[g] || null;
 		const a = after[g] || null;
 		const cls = RGClassifyChange(b, a, g);
+		if ((Number(s.spokenCount) || 0) >= RGSpokenLimit(cls.kind)) continue; 
 		const itemName = cls.change === "remove" ? (b ? b.name : null) : (a ? a.name : null);
 		if (cls.kind === "restraint") s.c3 = true; else s.c2 = true;
 		s.actions.push({ t: RGNow(), target: victim, kind: cls.kind, change: cls.change, group: g, item: itemName || null });
@@ -653,17 +710,28 @@ const RGText = {
 		condClothesTitle: "进房后一句话没说就开始改其他玩家的外观/服装即触发",
 		condRestraint: "未说话就给别人上束缚道具",
 		condRestraintTitle: "进房后一句话没说就开始给其他玩家穿戴束缚类道具即触发",
+		clothesMaxSpoken: "改衣服：说话少于多少句触发",
+		restraintMaxSpoken: "上束缚：说话少于多少句触发",
+		spokenHint: "提示：设为 1 = 一句话都不说就动手；设为 2 = 说一句话就动手；设为 3 = 说两句话就动手，以此类推。",
 		minAgeDays: "账号年龄阈值（天）",
 		minAgeDaysTitle: "对方账号创建至今不足此天数，视为「新号」",
 		combine: "多条件逻辑",
 		combineAny: "满足其一（任一条件成立即踢）",
+		combineTwo: "满足其二（任意两条条件成立即踢）",
 		combineAll: "同时满足（全部勾选条件都成立才踢）",
 		banAfterKicks: "自动拉黑阈值（踢出次数，0=关闭）",
 		banAfterKicksTitle: "同一玩家被本守卫踢出达到此次数后，自动加入房间黑名单",
+		notifyBeforeKick: "踢出前发送提示消息",
+		notifyBeforeKickTitle: "勾选：先按各条件发送对应的提示消息，3 秒后再踢；不勾选：直接踢",
+		msgAgeLabel: "年龄条件提示消息",
+		msgClothesLabel: "改衣服条件提示消息",
+		msgRestraintLabel: "上束缚条件提示消息",
+		msgPlaceholder: "消息里可用 {0} 表示对方昵称/名字",
 		statusAdmin: "● 你是房间管理员：守卫生效，会检查新加入的玩家",
 		statusNotAdmin: "○ 你不是房间管理员：守卫不会踢人（仅可查看/修改设置与日志）",
 		statusDisabled: "○ 守卫已关闭（主开关未启用）",
 		logHeader: "踢出日志",
+		logBtn: "日志",
 		logEmpty: "暂无记录",
 		logCount: "共 {0} 条",
 		reasonAge: "账号年龄过小",
@@ -680,6 +748,8 @@ const RGText = {
 		changeOther: "其他",
 		bannedBadge: "已拉黑",
 		kickedCount: "累计踢出 {0} 次",
+		remainToBan: "还剩 {0} 次拉黑",
+		resetCountBtn: "归零计数",
 		expandAll: "展开全部 {0} 条",
 		collapse: "收起",
 		exportBtn: "导出日志",
@@ -712,17 +782,28 @@ const RGText = {
 		condClothesTitle: "Trigger when they modify another player's appearance/clothes before saying a word",
 		condRestraint: "Applied restraints without speaking",
 		condRestraintTitle: "Trigger when they put restraint items on another player before saying a word",
+		clothesMaxSpoken: "Clothes: trigger if spoken fewer than N",
+		restraintMaxSpoken: "Restraint: trigger if spoken fewer than N",
+		spokenHint: "Hint: 1 = act without saying a word; 2 = act after one message; 3 = act after two messages, and so on.",
 		minAgeDays: "Account age threshold (days)",
 		minAgeDaysTitle: "Accounts younger than this many days count as 'new'",
 		combine: "Combine logic",
 		combineAny: "Any (trigger if ANY enabled condition is met)",
+		combineTwo: "Any two (trigger if ANY TWO conditions are met)",
 		combineAll: "All (trigger only if ALL enabled conditions are met)",
 		banAfterKicks: "Auto-ban after kicks (0 = off)",
 		banAfterKicksTitle: "After kicking the same player this many times, add them to the room ban list",
+		notifyBeforeKick: "Send notice before kicking",
+		notifyBeforeKickTitle: "Checked: send each satisfied condition's notice, then kick after 3s; unchecked: kick directly",
+		msgAgeLabel: "Age condition notice",
+		msgClothesLabel: "Clothes condition notice",
+		msgRestraintLabel: "Restraint condition notice",
+		msgPlaceholder: "Use {0} for the player's name",
 		statusAdmin: "● You are a room admin: guard is active for new joiners",
 		statusNotAdmin: "○ You are not a room admin: guard won't kick (settings/log still viewable)",
 		statusDisabled: "○ Guard is disabled (master switch off)",
 		logHeader: "Kick log",
+		logBtn: "Log",
 		logEmpty: "No records",
 		logCount: "{0} entries",
 		reasonAge: "Account too new",
@@ -739,6 +820,8 @@ const RGText = {
 		changeOther: "Other",
 		bannedBadge: "Banned",
 		kickedCount: "Kicked {0} times total",
+		remainToBan: "{0} more to ban",
+		resetCountBtn: "Reset",
 		expandAll: "Show all {0}",
 		collapse: "Collapse",
 		exportBtn: "Export log",
@@ -790,13 +873,24 @@ function RGChangeLabel(change) {
 
  
 
+ 
+const RG_ACCENT = "#2ec4b6";
+const RG_BG = "#1b1e2b";
+const RG_PANEL = "#232838";
+const RG_BORDER = "#3a4160";
+const RG_TEXT = "#e8e8f0";
+const RG_TEXT_DIM = "#9aa0b5";
+
 const RGUI = {
 	lang: "zh",
 	open: false,
+	logOpen: false,
 	win: null,
 	titleEl: null,
 	settingsEl: null,
 	statusEl: null,
+	logWin: null,
+	logTitleEl: null,
 	logEl: null,
 	dot: null,
 	minimized: false,
@@ -807,34 +901,90 @@ const RGUI = {
 	refreshTimer: null,
 };
 
-function RGEl(tag, cls, text) {
+function RGStyle(el, obj) { for (const k in obj) el.style[k] = obj[k]; }
+
+function RGEl(tag, style, text) {
 	const el = document.createElement(tag);
-	if (cls) el.className = cls;
-	if (text != null) el.textContent = text;
+	if (style) RGStyle(el, style);
+	if (text !== undefined && text !== null) el.textContent = text;
 	return el;
+}
+
+ 
+function RGBigBtn(label, onClick, opts) {
+	opts = opts || {};
+	const b = RGEl("button", {
+		padding: "10px 16px", fontSize: "15px", fontWeight: "600", fontFamily: "sans-serif",
+		background: opts.bg || RG_BORDER, color: "#ffffff", border: "1px solid #ffffff",
+		borderRadius: "8px", cursor: "pointer",
+	}, label);
+	b.title = opts.title || "";
+	b.addEventListener("click", (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); onClick(); });
+	return b;
+}
+
+ 
+function RGSmallBtn(label, onClick, opts) {
+	opts = opts || {};
+	const b = RGEl("button", {
+		padding: "4px 8px", fontSize: "12px", fontFamily: "sans-serif",
+		background: opts.bg || "#2c3350", color: "#ffffff", border: "1px solid #6a7290",
+		borderRadius: "6px", cursor: "pointer",
+	}, label);
+	b.title = opts.title || "";
+	b.addEventListener("click", (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); onClick(); });
+	return b;
+}
+
+ 
+function RGAttachDrag(win, bar, res, onSave) {
+	bar.addEventListener("pointerdown", (ev) => {
+		if (ev.target && ev.target.tagName === "BUTTON") return;
+		const drag = { sx: ev.clientX, sy: ev.clientY, ox: win.offsetLeft, oy: win.offsetTop };
+		const move = (e) => {
+			win.style.left = (drag.ox + e.clientX - drag.sx) + "px";
+			win.style.top = (drag.oy + e.clientY - drag.sy) + "px";
+		};
+		const up = () => {
+			window.removeEventListener("pointermove", move);
+			window.removeEventListener("pointerup", up);
+			if (onSave) onSave();
+		};
+		window.addEventListener("pointermove", move);
+		window.addEventListener("pointerup", up);
+	});
+	res.addEventListener("pointerdown", (ev) => {
+		ev.preventDefault(); ev.stopPropagation();
+		const drag = { sx: ev.clientX, sy: ev.clientY, ow: win.offsetWidth, oh: win.offsetHeight };
+		const move = (e) => {
+			let w = drag.ow + e.clientX - drag.sx;
+			let h = drag.oh + e.clientY - drag.sy;
+			if (w < RG_MIN_WIN_W) w = RG_MIN_WIN_W;
+			if (h < RG_MIN_WIN_H) h = RG_MIN_WIN_H;
+			win.style.width = w + "px";
+			win.style.height = h + "px";
+		};
+		const up = () => {
+			window.removeEventListener("pointermove", move);
+			window.removeEventListener("pointerup", up);
+			if (onSave) onSave();
+		};
+		window.addEventListener("pointermove", move);
+		window.addEventListener("pointerup", up);
+	});
 }
 
  
 function RGUIDotBuild() {
 	if (RGUI.dot) return;
-	const dot = RGEl("div", "rg-dot", "🛡");
+	const dot = RGEl("div", {
+		position: "fixed", zIndex: "2147483000", width: "46px", height: "46px",
+		borderRadius: "50%", background: RG_ACCENT, color: "#ffffff",
+		display: "flex", alignItems: "center", justifyContent: "center",
+		fontSize: "20px", cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
+		userSelect: "none", right: "16px", bottom: "16px",
+	}, "🛡");
 	dot.title = RGT("dotTitle");
-	dot.style.position = "fixed";
-	dot.style.zIndex = "2147483000";
-	dot.style.width = "44px";
-	dot.style.height = "44px";
-	dot.style.borderRadius = "50%";
-	dot.style.background = "linear-gradient(135deg, #c0392b, #e74c3c)";
-	dot.style.color = "#fff";
-	dot.style.display = "flex";
-	dot.style.alignItems = "center";
-	dot.style.justifyContent = "center";
-	dot.style.fontSize = "20px";
-	dot.style.cursor = "pointer";
-	dot.style.boxShadow = "0 2px 8px rgba(0,0,0,0.4)";
-	dot.style.userSelect = "none";
-	dot.style.right = "16px";
-	dot.style.bottom = "16px";
 
 	let saved = null;
 	try {
@@ -887,120 +1037,55 @@ function RGUIDotBuild() {
 function RGUIBuild() {
 	if (RGUI.win) return;
 
-	const win = RGEl("div", "rg-win");
-	win.style.position = "fixed";
-	win.style.zIndex = "2147482999";
-	win.style.background = "#ffffff";
-	win.style.border = "3px solid #b0b0b0";
-	win.style.borderRadius = "10px";
-	win.style.boxShadow = "0 6px 24px rgba(0,0,0,0.35)";
-	win.style.width = "440px";
-	win.style.height = "560px";
-	win.style.display = "flex";
-	win.style.flexDirection = "column";
-	win.style.overflow = "hidden";
-	win.style.fontFamily = "sans-serif";
-	win.style.fontSize = "14px";
-	win.style.color = "#222";
+	const win = RGEl("div", {
+		position: "fixed", left: "38%", top: "18%", width: "440px", height: "500px",
+		zIndex: "2147483500", background: RG_BG, border: "2px solid #ffffff",
+		borderRadius: "10px", boxShadow: "0 8px 40px rgba(0,0,0,.6)",
+		display: "none", color: RG_TEXT, fontFamily: "sans-serif", fontSize: "14px",
+		overflow: "hidden", flexDirection: "column",
+	});
 
 	
-	const bar = RGEl("div", "rg-bar");
-	bar.style.display = "flex";
-	bar.style.alignItems = "center";
-	bar.style.background = "#333";
-	bar.style.color = "#fff";
-	bar.style.padding = "8px 10px";
-	bar.style.cursor = "move";
-	bar.style.userSelect = "none";
-
-	const title = RGEl("span", "rg-title", RGT("title"));
-	title.style.flex = "1";
-	title.style.fontWeight = "bold";
-	title.style.fontSize = "15px";
-
-	const btnMin = RGEl("button", "rg-btn", "—");
-	btnMin.title = RGT("minimizeTitle");
-	const btnClose = RGEl("button", "rg-btn", "✕");
-	btnClose.title = RGT("closeTitle");
-	for (const b of [btnMin, btnClose]) {
-		b.style.marginLeft = "6px";
-		b.style.border = "none";
-		b.style.background = "transparent";
-		b.style.color = "#fff";
-		b.style.fontSize = "16px";
-		b.style.cursor = "pointer";
-		b.style.padding = "2px 8px";
-	}
-	btnMin.addEventListener("click", () => { RGUI.minimized = !RGUI.minimized; RGUIRefresh(); });
-	btnClose.addEventListener("click", RoomGuardClose);
+	const bar = RGEl("div", {
+		display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px",
+		background: "#141826", borderBottom: "1px solid " + RG_BORDER,
+		cursor: "move", userSelect: "none",
+	});
+	const icon = RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡");
+	const title = RGEl("span", { fontWeight: "700", fontSize: "15px", flex: "1" }, RGT("title"));
+	const btnMin = RGSmallBtn("—", () => { RGUI.minimized = !RGUI.minimized; RGUIRefresh(); }, { title: RGT("minimizeTitle") });
+	const btnClose = RGSmallBtn("✕", RoomGuardClose, { title: RGT("closeTitle") });
+	bar.appendChild(icon);
 	bar.appendChild(title);
 	bar.appendChild(btnMin);
 	bar.appendChild(btnClose);
 
 	
-	const toolbar = RGEl("div", "rg-toolbar");
-	toolbar.style.display = "flex";
-	toolbar.style.gap = "6px";
-	toolbar.style.padding = "6px 10px";
-	toolbar.style.background = "#f4f4f4";
-	toolbar.style.borderBottom = "1px solid #ddd";
-
-	const btnLang = RGRenderBtn(RGT("langBtn"), () => {
-		RGUI.lang = RGUI.lang === "zh" ? "en" : "zh";
-		try { RGStorage.set(RG_LANG_KEY, RGUI.lang); } catch (e) {   }
-		RGUI.titleEl.textContent = RGT("title");
-		btnLang.textContent = RGT("langBtn");
-		RGUI.dot.title = RGT("dotTitle");
-		RGUIRefresh();
+	const toolbar = RGEl("div", {
+		display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center",
+		padding: "8px 12px", background: "#20243a", borderBottom: "1px solid " + RG_BORDER,
 	});
-	const btnExport = RGRenderBtn(RGT("exportBtn"), RGUIBackupExport);
-	const btnClear = RGRenderBtn(RGT("clearBtn"), (ev) => RGUIArmClear(ev && ev.currentTarget ? ev.currentTarget : null));
+	const btnLog = RGBigBtn(RGT("logBtn"), RGUILogWinToggle, { bg: "#2c7a70" });
+	const btnLang = RGBigBtn(RGT("langBtn"), RGUILangToggle);
+	toolbar.appendChild(btnLog);
 	toolbar.appendChild(btnLang);
-	toolbar.appendChild(btnExport);
-	toolbar.appendChild(btnClear);
 
 	
-	const body = RGEl("div", "rg-body");
-	body.style.flex = "1";
-	body.style.overflow = "auto";
-	body.style.padding = "10px";
-	body.style.background = "#fff";
-
-	const settings = RGEl("div", "rg-settings");
-	const status = RGEl("div", "rg-status");
-	status.style.margin = "10px 0";
-	status.style.padding = "8px";
-	status.style.borderRadius = "6px";
-	status.style.background = "#f7f7f7";
-	status.style.fontSize = "13px";
-
-	const logHead = RGEl("div", "rg-loghead", RGT("logHeader"));
-	logHead.style.fontWeight = "bold";
-	logHead.style.marginTop = "4px";
-	logHead.style.marginBottom = "6px";
-
-	const log = RGEl("div", "rg-log");
-	log.style.maxHeight = "220px";
-	log.style.overflow = "auto";
-	log.style.border = "1px solid #e0e0e0";
-	log.style.borderRadius = "6px";
-	log.style.padding = "6px";
-
+	const body = RGEl("div", { flex: "1", overflow: "auto", padding: "12px", background: RG_BG });
+	const settings = RGEl("div");
+	const status = RGEl("div", {
+		margin: "12px 0 0", padding: "10px 12px", borderRadius: "8px",
+		background: RG_PANEL, border: "1px solid " + RG_BORDER, fontSize: "13px",
+	});
 	body.appendChild(settings);
 	body.appendChild(status);
-	body.appendChild(logHead);
-	body.appendChild(log);
 
 	
-	const res = RGEl("div", "rg-resize", "");
+	const res = RGEl("div", {
+		position: "absolute", right: "0", bottom: "0", width: "18px", height: "18px",
+		cursor: "se-resize", background: "linear-gradient(135deg, transparent 50%, " + RG_BORDER + " 50%)",
+	});
 	res.title = RGT("resizeTitle");
-	res.style.position = "absolute";
-	res.style.right = "0";
-	res.style.bottom = "0";
-	res.style.width = "18px";
-	res.style.height = "18px";
-	res.style.cursor = "se-resize";
-	res.style.background = "linear-gradient(135deg, transparent 50%, #bbb 50%)";
 
 	win.appendChild(bar);
 	win.appendChild(toolbar);
@@ -1013,32 +1098,100 @@ function RGUIBuild() {
 	RGUI.titleEl = title;
 	RGUI.settingsEl = settings;
 	RGUI.statusEl = status;
-	RGUI.logEl = log;
 
-	RGUIBindDrag(bar, res);
+	RGAttachDrag(win, bar, res, RGUISaveWinGeom);
 	RGUIBuildSettings(settings);
 	RGUIRestoreWinGeom();
+
+	
+	RGUILogWinBuild();
 }
 
  
-function RGRenderBtn(text, onClick) {
-	const b = RGEl("button", "rg-btn", text);
-	b.style.padding = "6px 10px";
-	b.style.border = "1px solid #ccc";
-	b.style.borderRadius = "6px";
-	b.style.background = "#fff";
-	b.style.cursor = "pointer";
-	b.style.fontSize = "13px";
-	b.addEventListener("click", onClick);
-	return b;
+function RGUILogWinBuild() {
+	if (RGUI.logWin) return;
+	const win = RGEl("div", {
+		position: "fixed", left: "40%", top: "20%", width: "560px", height: "440px",
+		zIndex: "2147483490", background: RG_BG, border: "2px solid #ffffff",
+		borderRadius: "10px", boxShadow: "0 8px 40px rgba(0,0,0,.6)",
+		display: "none", color: RG_TEXT, fontFamily: "sans-serif", fontSize: "14px",
+		overflow: "hidden", flexDirection: "column",
+	});
+
+	const bar = RGEl("div", {
+		display: "flex", alignItems: "center", gap: "8px", padding: "8px 12px",
+		background: "#141826", borderBottom: "1px solid " + RG_BORDER,
+		cursor: "move", userSelect: "none",
+	});
+	bar.appendChild(RGEl("span", { color: RG_ACCENT, fontSize: "18px" }, "🛡"));
+	const title = RGEl("span", { fontWeight: "700", fontSize: "15px", flex: "1" }, RGT("logHeader"));
+	const btnClose = RGSmallBtn("✕", RGUILogWinClose, { title: RGT("closeTitle") });
+	bar.appendChild(title);
+	bar.appendChild(btnClose);
+
+	
+	const toolbar = RGEl("div", {
+		display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center",
+		padding: "8px 12px", background: "#20243a", borderBottom: "1px solid " + RG_BORDER,
+	});
+	const btnExport = RGBigBtn(RGT("exportBtn"), RGUIBackupExport);
+	const btnClear = RGBigBtn(RGT("clearBtn"), (ev) => RGUIArmClear(ev && ev.currentTarget ? ev.currentTarget : null), { bg: "#7a2c3a" });
+	toolbar.appendChild(btnExport);
+	toolbar.appendChild(btnClear);
+
+	const log = RGEl("div", { flex: "1", overflow: "auto", padding: "10px" });
+
+	const res = RGEl("div", {
+		position: "absolute", right: "0", bottom: "0", width: "18px", height: "18px",
+		cursor: "se-resize", background: "linear-gradient(135deg, transparent 50%, " + RG_BORDER + " 50%)",
+	});
+	res.title = RGT("resizeTitle");
+
+	win.appendChild(bar);
+	win.appendChild(toolbar);
+	win.appendChild(log);
+	win.appendChild(res);
+
+	document.body.appendChild(win);
+
+	RGUI.logWin = win;
+	RGUI.logTitleEl = title;
+	RGUI.logEl = log;
+
+	RGAttachDrag(win, bar, res, RGUILogWinSaveGeom);
+	RGUILogWinRestoreGeom();
+}
+
+function RGUILogWinShow() {
+	RGUILogWinBuild();
+	RGUI.logOpen = true;
+	RGUI.logWin.style.display = "flex";
+	RGUI.renderLog();
+}
+
+function RGUILogWinClose() {
+	RGUI.logOpen = false;
+	if (RGUI.logWin) RGUI.logWin.style.display = "none";
+}
+
+function RGUILogWinToggle() {
+	if (RGUI.logOpen) RGUILogWinClose(); else RGUILogWinShow();
+}
+
+ 
+function RGUILangToggle() {
+	RGUI.lang = RGUI.lang === "zh" ? "en" : "zh";
+	try { RGStorage.set(RG_LANG_KEY, RGUI.lang); } catch (e) {   }
+	if (RGUI.titleEl) RGUI.titleEl.textContent = RGT("title");
+	if (RGUI.logTitleEl) RGUI.logTitleEl.textContent = RGT("logHeader");
+	if (RGUI.dot) RGUI.dot.title = RGT("dotTitle");
+	RGUIRefresh();
 }
 
  
 function RGUIBuildSettings(root) {
 	root.innerHTML = "";
-	const h = RGEl("div", "rg-sect", RGT("settingsHeader"));
-	h.style.fontWeight = "bold";
-	h.style.marginBottom = "8px";
+	const h = RGEl("div", { fontWeight: "700", color: RG_ACCENT, fontSize: "13px", marginBottom: "10px" }, RGT("settingsHeader"));
 	root.appendChild(h);
 
 	
@@ -1050,13 +1203,13 @@ function RGUIBuildSettings(root) {
 
 	
 	root.appendChild(RGCheckboxRow("rg-set-condAge", RGT("condAge"), "change", (v) => {
-		RGStore.state.settings.condAge = v; RGStore.save(); RGUI.renderStatus();
+		RGStore.state.settings.condAge = v; RGCondChanged();
 	}));
 	root.appendChild(RGCheckboxRow("rg-set-condClothes", RGT("condClothes"), "change", (v) => {
-		RGStore.state.settings.condClothes = v; RGStore.save(); RGUI.renderStatus();
+		RGStore.state.settings.condClothes = v; RGCondChanged();
 	}));
 	root.appendChild(RGCheckboxRow("rg-set-condRestraint", RGT("condRestraint"), "change", (v) => {
-		RGStore.state.settings.condRestraint = v; RGStore.save(); RGUI.renderStatus();
+		RGStore.state.settings.condRestraint = v; RGCondChanged();
 	}));
 
 	
@@ -1065,57 +1218,65 @@ function RGUIBuildSettings(root) {
 	}));
 
 	
-	root.appendChild(RGRadioRow("rg-set-combine", RGT("combine"), [
-		{ value: "any", label: RGT("combineAny") },
-		{ value: "all", label: RGT("combineAll") },
-	], (v) => { RGStore.state.settings.combine = v; RGStore.save(); }));
+	const spokenHint = RGEl("div", { color: RG_TEXT_DIM, fontSize: "12px", margin: "2px 0 8px" }, RGT("spokenHint"));
+	root.appendChild(spokenHint);
+	root.appendChild(RGNumberRow("rg-set-clothesMaxSpoken", RGT("clothesMaxSpoken"), 1, 100, (v) => {
+		RGStore.state.settings.clothesMaxSpoken = v; RGStore.save();
+	}));
+	root.appendChild(RGNumberRow("rg-set-restraintMaxSpoken", RGT("restraintMaxSpoken"), 1, 100, (v) => {
+		RGStore.state.settings.restraintMaxSpoken = v; RGStore.save();
+	}));
+
+	
+	RGUI.combineRow = RGEl("div", { marginBottom: "10px", fontSize: "13px", color: RG_TEXT });
+	root.appendChild(RGUI.combineRow);
+	RGUIRenderCombine();
 
 	
 	root.appendChild(RGNumberRow("rg-set-banAfterKicks", RGT("banAfterKicks"), 0, 100, (v) => {
 		RGStore.state.settings.banAfterKicks = v; RGStore.save();
 	}));
 
+	
+	root.appendChild(RGCheckboxRow("rg-set-notify", RGT("notifyBeforeKick"), "change", (v) => {
+		RGStore.state.settings.notifyBeforeKick = v; RGStore.save();
+	}, RGT("notifyBeforeKickTitle")));
+
+	
+	const hint = RGEl("div", { color: RG_TEXT_DIM, fontSize: "12px", margin: "2px 0 8px" }, RGT("msgPlaceholder"));
+	root.appendChild(hint);
+	root.appendChild(RGTextRow("rg-set-msgAge", RGT("msgAgeLabel"), (v) => { RGStore.state.settings.msgAge = v; RGStore.save(); }));
+	root.appendChild(RGTextRow("rg-set-msgClothes", RGT("msgClothesLabel"), (v) => { RGStore.state.settings.msgClothes = v; RGStore.save(); }));
+	root.appendChild(RGTextRow("rg-set-msgRestraint", RGT("msgRestraintLabel"), (v) => { RGStore.state.settings.msgRestraint = v; RGStore.save(); }));
+
 	RGUI.renderSettings();
 }
 
  
-function RGCheckboxRow(id, label, evt, onChange) {
-	const row = RGEl("label", "rg-row");
-	row.style.display = "flex";
-	row.style.alignItems = "center";
-	row.style.gap = "8px";
-	row.style.marginBottom = "7px";
-	row.style.fontSize = "13px";
-	row.style.cursor = "pointer";
+function RGCheckboxRow(id, label, evt, onChange, title) {
+	const row = RGEl("label", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", fontSize: "13px", cursor: "pointer", color: RG_TEXT });
+	row.title = title || "";
 	const cb = RGEl("input");
 	cb.type = "checkbox";
 	cb.id = id;
 	cb.addEventListener(evt, () => onChange(cb.checked));
-	const span = RGEl("span", null, label);
 	row.appendChild(cb);
-	row.appendChild(span);
+	row.appendChild(RGEl("span", null, label));
 	return row;
 }
 
  
 function RGNumberRow(id, label, min, max, onChange) {
-	const row = RGEl("div", "rg-row");
-	row.style.display = "flex";
-	row.style.alignItems = "center";
-	row.style.gap = "8px";
-	row.style.marginBottom = "7px";
-	row.style.fontSize = "13px";
-	const span = RGEl("span", null, label);
-	span.style.flex = "1";
-	const inp = RGEl("input");
+	const row = RGEl("div", { display: "flex", alignItems: "center", gap: "8px", marginBottom: "8px", fontSize: "13px", color: RG_TEXT });
+	const span = RGEl("span", { flex: "1" }, label);
+	const inp = RGEl("input", {
+		width: "72px", padding: "6px 8px", fontSize: "13px", borderRadius: "6px",
+		background: "#10141f", color: RG_TEXT, border: "1px solid " + RG_BORDER, fontFamily: "sans-serif",
+	});
 	inp.type = "number";
 	inp.id = id;
 	inp.min = String(min);
 	inp.max = String(max);
-	inp.style.width = "72px";
-	inp.style.padding = "4px 6px";
-	inp.style.border = "1px solid #ccc";
-	inp.style.borderRadius = "5px";
 	inp.addEventListener("change", () => {
 		let v = Math.floor(Number(inp.value));
 		if (!Number.isFinite(v)) v = min;
@@ -1131,18 +1292,11 @@ function RGNumberRow(id, label, min, max, onChange) {
 
  
 function RGRadioRow(name, label, options, onChange) {
-	const row = RGEl("div", "rg-row");
-	row.style.marginBottom = "7px";
-	row.style.fontSize = "13px";
-	const lbl = RGEl("div", null, label);
-	lbl.style.fontWeight = "bold";
-	lbl.style.marginBottom = "3px";
+	const row = RGEl("div", { marginBottom: "10px", fontSize: "13px", color: RG_TEXT });
+	const lbl = RGEl("div", { fontWeight: "700", color: RG_TEXT_DIM, marginBottom: "4px" }, label);
 	row.appendChild(lbl);
 	for (const o of options) {
-		const opt = RGEl("label", "rg-opt");
-		opt.style.display = "block";
-		opt.style.margin = "2px 0 2px 8px";
-		opt.style.cursor = "pointer";
+		const opt = RGEl("label", { display: "block", margin: "3px 0 3px 8px", cursor: "pointer" });
 		const r = RGEl("input");
 		r.type = "radio";
 		r.name = name;
@@ -1156,71 +1310,92 @@ function RGRadioRow(name, label, options, onChange) {
 }
 
  
-function RGUIBindDrag(bar, res) {
-	
-	bar.addEventListener("pointerdown", (ev) => {
-		if (ev.target && (ev.target.tagName === "BUTTON")) return;
-		RGUI.winDrag = { sx: ev.clientX, sy: ev.clientY, ox: RGUI.win.offsetLeft, oy: RGUI.win.offsetTop };
-		const move = (e) => {
-			if (!RGUI.winDrag) return;
-			RGUI.win.style.left = (RGUI.winDrag.ox + e.clientX - RGUI.winDrag.sx) + "px";
-			RGUI.win.style.top = (RGUI.winDrag.oy + e.clientY - RGUI.winDrag.sy) + "px";
-		};
-		const up = () => {
-			window.removeEventListener("pointermove", move);
-			window.removeEventListener("pointerup", up);
-			RGUI.winDrag = null;
-			RGUISaveWinGeom();
-		};
-		window.addEventListener("pointermove", move);
-		window.addEventListener("pointerup", up);
+function RGTextRow(id, label, onChange) {
+	const row = RGEl("div", { marginBottom: "8px", fontSize: "13px", color: RG_TEXT });
+	const lbl = RGEl("div", { color: RG_TEXT_DIM, marginBottom: "3px" }, label);
+	const inp = RGEl("input", {
+		width: "100%", boxSizing: "border-box", padding: "6px 8px", fontSize: "13px", borderRadius: "6px",
+		background: "#10141f", color: RG_TEXT, border: "1px solid " + RG_BORDER, fontFamily: "sans-serif",
 	});
-	
-	res.addEventListener("pointerdown", (ev) => {
-		ev.preventDefault();
-		ev.stopPropagation();
-		RGUI.resDrag = { sx: ev.clientX, sy: ev.clientY, ow: RGUI.win.offsetWidth, oh: RGUI.win.offsetHeight };
-		const move = (e) => {
-			if (!RGUI.resDrag) return;
-			let w = RGUI.resDrag.ow + e.clientX - RGUI.resDrag.sx;
-			let h = RGUI.resDrag.oh + e.clientY - RGUI.resDrag.sy;
-			if (w < RG_MIN_WIN_W) w = RG_MIN_WIN_W;
-			if (h < RG_MIN_WIN_H) h = RG_MIN_WIN_H;
-			RGUI.win.style.width = w + "px";
-			RGUI.win.style.height = h + "px";
-		};
-		const up = () => {
-			window.removeEventListener("pointermove", move);
-			window.removeEventListener("pointerup", up);
-			RGUI.resDrag = null;
-			RGUISaveWinGeom();
-		};
-		window.addEventListener("pointermove", move);
-		window.addEventListener("pointerup", up);
-	});
+	inp.type = "text";
+	inp.id = id;
+	inp.addEventListener("change", () => onChange(inp.value));
+	row.appendChild(lbl);
+	row.appendChild(inp);
+	return row;
 }
 
-function RGUIRestoreWinGeom() {
+ 
+function RGUIRenderCombine() {
+	if (!RGUI.combineRow) return;
+	const s = RGStore.state.settings;
+	const all3 = s.condAge && s.condClothes && s.condRestraint;
+	RGUI.combineRow.innerHTML = "";
+	RGUI.combineRow.appendChild(RGEl("div", { fontWeight: "700", color: RG_TEXT_DIM, marginBottom: "4px" }, RGT("combine")));
+	const options = [{ value: "any", label: RGT("combineAny") }];
+	if (all3) options.push({ value: "two", label: RGT("combineTwo") });
+	options.push({ value: "all", label: RGT("combineAll") });
+	for (const o of options) {
+		const opt = RGEl("label", { display: "block", margin: "3px 0 3px 8px", cursor: "pointer" });
+		const r = RGEl("input");
+		r.type = "radio";
+		r.name = "rg-set-combine";
+		r.value = o.value;
+		if (o.value === s.combine) r.checked = true;
+		r.addEventListener("change", () => { if (r.checked) { RGStore.state.settings.combine = o.value; RGStore.save(); } });
+		opt.appendChild(r);
+		opt.appendChild(RGEl("span", null, " " + o.label));
+		RGUI.combineRow.appendChild(opt);
+	}
+}
+
+ 
+function RGCondChanged() {
+	const s = RGStore.state.settings;
+	if (s.combine === "two" && !(s.condAge && s.condClothes && s.condRestraint)) {
+		s.combine = "any";
+	}
+	RGStore.save();
+	RGUI.renderSettings();
+	RGUI.renderStatus();
+}
+
+ 
+function RGWinGeomGet(key, win) {
 	try {
-		const key = RG_WIN_KEY + ":" + (RGStore.accountNum != null ? RGStore.accountNum : 0);
 		const raw = RGStorage.get(key);
 		if (raw) {
 			const g = JSON.parse(raw);
 			if (g && Number.isFinite(Number(g.w)) && Number.isFinite(Number(g.h)) && Number.isFinite(Number(g.x)) && Number.isFinite(Number(g.y))) {
-				RGUI.win.style.width = g.w + "px";
-				RGUI.win.style.height = g.h + "px";
-				RGUI.win.style.left = g.x + "px";
-				RGUI.win.style.top = g.y + "px";
+				win.style.width = g.w + "px";
+				win.style.height = g.h + "px";
+				win.style.left = g.x + "px";
+				win.style.top = g.y + "px";
 			}
 		}
 	} catch (e) {   }
 }
 
-function RGUISaveWinGeom() {
+function RGWinGeomSet(key, win) {
 	try {
-		const key = RG_WIN_KEY + ":" + (RGStore.accountNum != null ? RGStore.accountNum : 0);
-		RGStorage.set(key, JSON.stringify({ x: RGUI.win.offsetLeft, y: RGUI.win.offsetTop, w: RGUI.win.offsetWidth, h: RGUI.win.offsetHeight }));
+		RGStorage.set(key, JSON.stringify({ x: win.offsetLeft, y: win.offsetTop, w: win.offsetWidth, h: win.offsetHeight }));
 	} catch (e) {   }
+}
+
+function RGUIRestoreWinGeom() {
+	RGWinGeomGet(RG_WIN_KEY + ":" + (RGStore.accountNum != null ? RGStore.accountNum : 0), RGUI.win);
+}
+
+function RGUISaveWinGeom() {
+	RGWinGeomSet(RG_WIN_KEY + ":" + (RGStore.accountNum != null ? RGStore.accountNum : 0), RGUI.win);
+}
+
+function RGUILogWinRestoreGeom() {
+	RGWinGeomGet(RG_WIN_KEY + "Log:" + (RGStore.accountNum != null ? RGStore.accountNum : 0), RGUI.logWin);
+}
+
+function RGUILogWinSaveGeom() {
+	RGWinGeomSet(RG_WIN_KEY + "Log:" + (RGStore.accountNum != null ? RGStore.accountNum : 0), RGUI.logWin);
 }
 
  
@@ -1233,8 +1408,13 @@ RGUI.renderSettings = function () {
 	const cr = get("rg-set-condRestraint"); if (cr) cr.checked = !!s.condRestraint;
 	const md = get("rg-set-minAgeDays"); if (md) md.value = String(s.minAgeDays);
 	const bk = get("rg-set-banAfterKicks"); if (bk) bk.value = String(s.banAfterKicks);
-	const radios = this.settingsEl ? this.settingsEl.querySelectorAll("input[name=rg-set-combine]") : [];
-	for (const r of radios) { r.checked = r.value === s.combine; }
+	const cm = get("rg-set-clothesMaxSpoken"); if (cm) cm.value = String(s.clothesMaxSpoken);
+	const rm = get("rg-set-restraintMaxSpoken"); if (rm) rm.value = String(s.restraintMaxSpoken);
+	const nf = get("rg-set-notify"); if (nf) nf.checked = !!s.notifyBeforeKick;
+	const ma = get("rg-set-msgAge"); if (ma) ma.value = s.msgAge || "";
+	const mc = get("rg-set-msgClothes"); if (mc) mc.value = s.msgClothes || "";
+	const mr = get("rg-set-msgRestraint"); if (mr) mr.value = s.msgRestraint || "";
+	RGUIRenderCombine();
 };
 
  
@@ -1262,39 +1442,27 @@ RGUI.renderLog = function () {
 
  
 function RGLogEntryEl(e, idx) {
-	const wrap = RGEl("div", "rg-logentry");
-	wrap.style.borderBottom = "1px solid #eee";
-	wrap.style.padding = "6px 2px";
-	wrap.style.fontSize = "12.5px";
+	const wrap = RGEl("div", { borderBottom: "1px solid " + RG_BORDER, padding: "8px 2px", fontSize: "12.5px", color: RG_TEXT });
 
-	const head = RGEl("div");
-	head.style.display = "flex";
-	head.style.flexWrap = "wrap";
-	head.style.gap = "6px";
-	head.style.alignItems = "center";
-
-	const time = RGEl("span", null, RGFormatTime(e.t));
-	time.style.color = "#888";
-	const who = RGEl("span", null, RGDispWho(e));
-	who.style.fontWeight = "bold";
-	const reason = RGEl("span", null, RGReasonLabel(e.reason));
-	reason.style.background = "#fdecea";
-	reason.style.color = "#c0392b";
-	reason.style.padding = "1px 6px";
-	reason.style.borderRadius = "4px";
+	const head = RGEl("div", { display: "flex", flexWrap: "wrap", gap: "6px", alignItems: "center" });
+	const time = RGEl("span", { color: RG_TEXT_DIM }, RGFormatTime(e.t));
+	const who = RGEl("span", { fontWeight: "700", color: RG_TEXT }, RGDispWho(e));
+	const reason = RGEl("span", { background: "rgba(231,76,60,.18)", color: "#ff9aa2", padding: "1px 6px", borderRadius: "4px" }, RGReasonLabel(e.reason));
 	head.appendChild(time);
 	head.appendChild(who);
 	head.appendChild(reason);
 	if (e.banned) {
-		const b = RGEl("span", null, RGT("bannedBadge"));
-		b.style.background = "#c0392b"; b.style.color = "#fff"; b.style.padding = "1px 6px"; b.style.borderRadius = "4px";
-		head.appendChild(b);
+		head.appendChild(RGEl("span", { background: "#e74c3c", color: "#fff", padding: "1px 6px", borderRadius: "4px" }, RGT("bannedBadge")));
 	}
 	const kc = Number(RGStore.state.kickCount[e.num]) || 0;
 	if (kc > 0) {
-		const k = RGEl("span", null, RGT("kickedCount", kc));
-		k.style.color = "#888";
-		head.appendChild(k);
+		head.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("kickedCount", kc)));
+	}
+	const banAfter = Number(RGStore.state.settings.banAfterKicks) || 0;
+	if (banAfter > 0) {
+		const remain = Math.max(0, banAfter - kc);
+		head.appendChild(RGEl("span", { color: RG_TEXT_DIM }, RGT("remainToBan", remain)));
+		head.appendChild(RGSmallBtn(RGT("resetCountBtn"), () => RGResetKickCount(e.num)));
 	}
 	wrap.appendChild(head);
 
@@ -1302,22 +1470,12 @@ function RGLogEntryEl(e, idx) {
 	const showMax = 3;
 	const collapsed = actions.length > showMax;
 	const shown = collapsed ? actions.slice(0, showMax) : actions;
-	const list = RGEl("div");
-	list.style.marginTop = "3px";
-	list.style.paddingLeft = "8px";
+	const list = RGEl("div", { marginTop: "4px", paddingLeft: "8px" });
 	for (const a of shown) list.appendChild(RGLogActionEl(a));
 	wrap.appendChild(list);
 
 	if (collapsed) {
-		const more = RGEl("button", "rg-more", RGT("expandAll", actions.length));
-		more.style.marginTop = "3px";
-		more.style.marginLeft = "8px";
-		more.style.border = "none";
-		more.style.background = "transparent";
-		more.style.color = "#2277cc";
-		more.style.cursor = "pointer";
-		more.style.fontSize = "12px";
-		more.style.padding = "0";
+		const more = RGEl("button", { marginTop: "4px", marginLeft: "8px", border: "none", background: "transparent", color: RG_ACCENT, cursor: "pointer", fontSize: "12px", padding: "0" }, RGT("expandAll", actions.length));
 		more.addEventListener("click", () => {
 			const expanded = list.getAttribute("data-expanded") === "1";
 			if (expanded) {
@@ -1339,10 +1497,8 @@ function RGLogEntryEl(e, idx) {
 
  
 function RGLogActionEl(a) {
-	const line = RGEl("div");
-	line.style.margin = "1px 0";
-	const target = RGEl("span", null, RGDisplayName(a.target));
-	target.style.fontWeight = "bold";
+	const line = RGEl("div", { margin: "2px 0" });
+	const target = RGEl("span", { fontWeight: "700", color: RG_TEXT }, RGDisplayName(a.target));
 	const kind = a.kind === "restraint" ? RGT("kindRestraint") : RGT("kindClothes");
 	const change = RGChangeLabel(a.change);
 	const groupLabel = RGGroupLabel(a.group);
@@ -1350,8 +1506,16 @@ function RGLogActionEl(a) {
 	let detail = kind;
 	if (change) detail += "·" + change;
 	line.appendChild(target);
-	line.appendChild(RGEl("span", null, " " + detail + "：" + groupLabel + (itemLabel ? " " + itemLabel : "")));
+	line.appendChild(RGEl("span", { color: RG_TEXT_DIM }, " " + detail + "：" + groupLabel + (itemLabel ? " " + itemLabel : "")));
 	return line;
+}
+
+ 
+function RGResetKickCount(num) {
+	if (!Number.isInteger(num)) return;
+	RGStore.state.kickCount[num] = 0;
+	RGStore.save();
+	RGUI.renderLog();
 }
 
  
@@ -1384,7 +1548,6 @@ function RGUIRefresh() {
 	for (const c of RGUI.win.children) c.style.display = "";
 	RGUI.renderSettings();
 	RGUI.renderStatus();
-	RGUI.renderLog();
 }
 
  
@@ -1396,10 +1559,11 @@ function RoomGuardOpen() {
 	RGUI.win.style.display = "flex";
 	RGUIRefresh();
 	RGToast(RGT("toastOpened", RGIsAdmin() ? RGT("statusAdmin") : RGT("statusNotAdmin")));
+	if (RGUI.refreshTimer) clearInterval(RGUI.refreshTimer);
 	RGUI.refreshTimer = setInterval(() => {
-		if (!RGUI.open) return;
+		if (!RGUI.open && !RGUI.logOpen) return;
 		RGUI.renderStatus();
-		RGUI.renderLog();
+		if (RGUI.logOpen) RGUI.renderLog();
 	}, 1500);
 }
 
@@ -1407,6 +1571,7 @@ function RoomGuardOpen() {
 function RoomGuardClose() {
 	RGUI.open = false;
 	if (RGUI.win) RGUI.win.style.display = "none";
+	RGUILogWinClose();
 	if (RGUI.refreshTimer) { clearInterval(RGUI.refreshTimer); RGUI.refreshTimer = null; }
 	if (RGUI.clearTimer) { clearTimeout(RGUI.clearTimer); RGUI.clearTimer = null; }
 	RGUI.clearArmed = false;
@@ -1420,16 +1585,22 @@ function RoomGuardToggle() {
 function RGUIArmClear(btn) {
 	if (!RGUI.clearArmed) {
 		RGUI.clearArmed = true;
-		if (btn) { btn.textContent = RGT("clearConfirm"); btn.style.background = "#e74c3c"; btn.style.color = "#fff"; }
+		if (btn) {
+			btn._origBg = btn.style.background;
+			btn._origBorder = btn.style.borderColor;
+			btn.textContent = RGT("clearConfirm");
+			btn.style.background = "#e74c3c";
+			btn.style.borderColor = "#ffb3b3";
+		}
 		RGUI.clearTimer = setTimeout(() => {
 			RGUI.clearArmed = false;
-			if (btn) { btn.textContent = RGT("clearBtn"); btn.style.background = ""; btn.style.color = ""; }
+			if (btn) { btn.textContent = RGT("clearBtn"); btn.style.background = btn._origBg || ""; btn.style.borderColor = btn._origBorder || ""; }
 		}, 3000);
 		return;
 	}
 	RGUI.clearArmed = false;
 	if (RGUI.clearTimer) { clearTimeout(RGUI.clearTimer); RGUI.clearTimer = null; }
-	if (btn) { btn.textContent = RGT("clearBtn"); btn.style.background = ""; btn.style.color = ""; }
+	if (btn) { btn.textContent = RGT("clearBtn"); btn.style.background = btn._origBg || ""; btn.style.borderColor = btn._origBorder || ""; }
 	RGStore.state.log = [];
 	RGStore.save();
 	RGUI.renderLog();
@@ -1479,34 +1650,28 @@ let RGToastEl = null;
 function RGToast(msg) {
 	try {
 		if (!RGToastEl) {
-			RGToastEl = RGEl("div", "rg-toast");
-			RGToastEl.style.position = "fixed";
-			RGToastEl.style.left = "50%";
-			RGToastEl.style.bottom = "60px";
-			RGToastEl.style.transform = "translateX(-50%)";
-			RGToastEl.style.background = "rgba(0,0,0,0.82)";
-			RGToastEl.style.color = "#fff";
-			RGToastEl.style.padding = "8px 14px";
-			RGToastEl.style.borderRadius = "8px";
-			RGToastEl.style.fontSize = "13px";
-			RGToastEl.style.zIndex = "2147483100";
-			RGToastEl.style.maxWidth = "80%";
+			RGToastEl = RGEl("div", {
+				position: "fixed", left: "16px", top: "16px", zIndex: "2147483600",
+				background: "#22283a", border: "1px solid " + RG_ACCENT, color: "#d7f7f2",
+				borderRadius: "8px", padding: "10px 16px", fontSize: "14px",
+				fontFamily: "sans-serif", display: "none", maxWidth: "420px", pointerEvents: "none",
+			});
 			document.body.appendChild(RGToastEl);
 		}
 		RGToastEl.textContent = msg;
 		RGToastEl.style.display = "block";
 		if (RGToastEl._t) clearTimeout(RGToastEl._t);
-		RGToastEl._t = setTimeout(() => { RGToastEl.style.display = "none"; }, 4000);
+		RGToastEl._t = setTimeout(() => { RGToastEl.style.display = "none"; }, 2600);
 	} catch (e) {   }
 }
 
  
 function RGKeyHandler(ev) {
 	if (ev.key !== "Escape") return;
-	if (!RGUI.open) return;
 	const ae = typeof document !== "undefined" ? document.activeElement : null;
 	if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
-	RoomGuardClose();
+	if (RGUI.logOpen) RGUILogWinClose();
+	else if (RGUI.open) RoomGuardClose();
 }
 
  
@@ -1598,9 +1763,11 @@ if (typeof module !== "undefined" && module.exports) {
 		RGState, RGIsAdmin, RGIsProtected, RGIsRelatedToRoom, RGComputeConds, RGTriggeredKeys, RGCondsTrigger,
 		RGColorKey, RGItemViewOf, RGItemViewFromData, RGClassifyChange,
 		RGOnJoin, RGOnMessage, RGOnItemChange, RGAppView, RGOnFullChange,
-		RGKickNow, RGDoAdmin, RGMaybeTrigger,
+		RGKickNow, RGFinishKick, RGDoAdmin, RGMaybeTrigger, RGNotifySend, RGNotifySendRaw, RGResetKickCount,
 		RGInstallHooks, RGText, RGT, RGReasonLabel, RGChangeLabel,
 		RGUI, RoomGuardOpen, RoomGuardClose, RoomGuardToggle, RGUIRefresh, RGUIBackupExport,
+		RGUILogWinShow, RGUILogWinClose, RGUILogWinToggle, RGUILangToggle, RGAttachDrag,
+		RGUIRenderCombine, RGCondChanged, RGTextRow,
 		RG_FORMAT: { RGFormatTime, RGDispWho, RGLogEntryEl, RGLogActionEl },
 	};
 }
